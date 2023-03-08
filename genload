@@ -1,0 +1,322 @@
+#!/bin/bash
+
+function get_item {
+
+	local dbfile="$configdir/$1.db"
+	#local -n array=$2		# Use 'nameref' to return array to caller
+	local array
+
+	while read -r line
+	do
+		element=($(echo $line | tr ':' ' '))
+		if [ ${element[0]} -eq 0 ]
+		then
+			array+=("${element[1]}")
+		fi
+
+	done < $dbfile
+	count=${#array[@]}
+	index=$(echo $((1 + $RANDOM % $count)))
+	echo ${array[$((index - 1))]}
+}
+
+function toggle_config {
+
+	local dbfile="$configdir/$1.db"
+	local array=($(sed -n "${2}p" $dbfile | tr ':' ' '))
+	
+	if [ ${array[0]} -eq 0 ]
+	then
+		newtext="1:${array[1]}"
+	else
+		newtext="0:${array[1]}"
+	fi
+
+	#echo "Newtext: $newtext"
+
+	#sed  -e "2s/.*/${num}:${text}/" profiles.db
+	#sed -e '2s/^\(.\):\(.*\)/2:\2/' profiles.db
+
+	sed -i -e "${2}s/.*/${newtext}/" $dbfile
+}
+
+function display_config {
+
+	local dbfile="$configdir/$1.db"
+	local idx=0
+	local state=""
+	
+	echo
+	while read -r line
+	do
+		idx=$((idx + 1))
+		local array=($(echo $line | tr ':' ' '))
+		if [ ${array[0]} -eq 0 ]
+		then
+			state="X"
+		else
+			state=" "
+		fi
+        printf "%4d. [%s] %s\n" "$idx" "$state" "${array[1]}"
+
+	done < "$dbfile"
+}
+
+function update_config {
+
+	local dbfile="$configdir/$1.db"
+	local count=$(cat $dbfile | wc -l)
+
+	case $1 in
+
+		"profiles")
+			title="application profiles"
+			;;
+		
+		"users")
+			title="users"
+			;;
+
+		"slots")
+			title="job slots"
+			;;
+
+		"runtimes")
+			title="job run duration"
+			;;
+
+		"queues")
+			title="queues"
+			;;
+	esac
+
+	while true
+	do
+		echo -e "\nSelect $title:"
+		display_config "$1"
+    	printf "\n%4s. %s\n\n" "q" "quit"
+		read -r -p "Enable/disable $title [1-$count] or quit [q]? " choice
+		if [ "$choice" = "q" ] || [ $choice = "Q" ]
+		then
+			#echo Quitting
+			exit 0
+		fi
+		if [[ $choice =~ ^[0-9]+$ ]]
+		then
+			if [ $choice -ge 1 ] && [ $choice -le $count ]
+			then
+				toggle_config "$1" "$choice"
+				continue
+			fi
+		fi
+		echo -e "\nInvalid selection"
+	done
+
+
+	
+}
+
+function create_db {
+
+	local dbname="$configdir/$1"
+	sed 's/^/0:/' "$dbname.conf" > "$dbname.db"
+}
+
+function scan_config {
+
+	local cfgfile="$configdir/$1.conf"
+
+	case $1 in
+
+		"profiles")
+			bapp | grep gl_ | awk '{print $1}' > "$cfgfile"
+			;;
+
+		"users")
+			ls /home > "$cfgfile"
+			;;
+
+		"slots")
+			local maxslots=$(bhosts|tail -n +2|awk '{print $4}'|paste -sd+|bc)
+			local slotcount=1
+			
+			rm -f "$cfgfile"
+			while [ $slotcount -lt $maxslots ]
+			do
+				echo "$slotcount" >> "$cfgfile"
+				slotcount=$((slotcount + slotcount))
+			done
+			echo "$maxslots" >> "$cfgfile"
+			;;
+
+		"runtimes")
+			cat > "$cfgfile" <<-EOF
+			1
+			5
+			10
+			15
+			30
+			45
+			60
+			120	
+			EOF
+			;;
+
+		"queues")
+			bqueues | tail -n+2 | awk '{print $1}' > $cfgfile
+			;;
+	esac
+	create_db "$1"
+}
+	
+
+#
+# MAIN
+#
+
+clustername=$(lsid | grep "My cluster" | awk '{print $NF}')
+if [ $? -ne 0 ]
+then
+	echo "Error: Cannot query LSF cluster"
+	exit 1
+fi
+
+# Create config dir
+genloaddir="$HOME/.genload"
+configdir="$genloaddir/$clustername"
+scriptdir="$genloaddir/scripts"
+pidfile="$configdir/pidfile"
+capfile="$configdir/capfile"
+logfile="$configdir/logfile"
+mkdir -p $configdir $scriptdir
+
+# Create configuration
+items=('profiles' 'slots' 'users' 'runtimes' 'queues')
+for item in "${items[@]}"
+do
+	[ ! -f "$configdir/$item.conf" ] || [ ! -f "$configdir/$item.db" ] && scan_config $item
+done
+
+
+# Set default capacity to 0% on first run
+if [ ! -f "$capfile" ]
+then
+	echo 0 > "$capfile"		
+fi
+
+case $1 in
+
+	"--start" | "start")
+		if [ -f "$pidfile" ]
+		then
+			echo "Daemon is already running"
+			exit 1
+		fi
+		$0 --daemon &
+		echo "Daemon started"
+		exit 0
+		;;
+
+	"--stop" | "stop")
+		if [ -f "$pidfile" ]
+		then
+			echo "Stopping daemon"
+			pid=$(cat $pidfile)
+			kill -9 $pid
+			[ $? -eq 0 ] && rm -f "$pidfile"
+			exit 0
+		else
+			echo "Daemon is not running"
+			exit 1
+		fi
+		;;
+
+	"--daemon")
+		if [ -f "$pidfile" ]
+		then
+			echo "Daemon is already running"
+			exit 1
+		fi
+		#continue
+		;;
+
+	[0-9] | [0-9][0-9] | [0-9][0-9][0-9] )
+		echo $1 > $capfile
+		echo "Load generation set to $1%"
+		exit 0
+		;;
+
+	"-p" | "profile" | "profiles")
+		update_config "profiles"
+		;;
+
+	"-u" | "user" | "users")
+		update_config "users"
+		;;
+
+	"-s" | "slot" | "slots")
+		update_config "slots"
+		;;
+
+	"-r" | "runtime" | "runtimes")
+		update_config "runtimes"
+		;;
+
+	"-q" | "queue" | "queues")
+		update_config "queues"
+		;;
+
+	"")
+		if [ -f "$pidfile" ]
+		then
+			pid=$(cat $pidfile)
+			echo "Daemon is running (PID: $pid)"
+		else
+			echo "Daemon is not running"
+		fi
+		echo "Load generation at $(cat $capfile)%"
+		exit 0
+		;;
+
+	*)
+		echo "Unknown option"
+		exit 1
+		;;
+
+esac	
+
+#echo "Daemon started"
+echo $$ > $pidfile
+
+maxslots=$(bhosts|tail -n +2|awk '{print $4}'|paste -sd+|bc)
+while true
+do
+	cap=$(cat $capfile)
+	targetslots=$(echo "$maxslots * $cap / 100" | bc)
+	usedslots=$(bqueues | tail -n +2 | awk '{print $8}' | paste -sd+ | bc)
+
+	slots=$(get_item "slots")
+	echo "Slots = $slots">> $logfile
+
+	if [ $((usedslots + slots)) -le $targetslots ]
+	then
+		echo "Capacity: $cap%" >> $logfile
+		echo "Max Slots: $maxslots" >> $logfile
+		echo "Target Slots: $targetslots" >> $logfile
+		echo "Used Slots: $usedslots" >> $logfile
+		echo >> $logfile
+		profile=$(get_item "profiles")
+		queue=$(get_item "queues")
+		user=$(get_item "users")
+		runtime=$(get_item "runtimes")
+		runuser -l "$user" -c "bsub -app $profile -n $slots -q $queue -We $runtime runload $runtime" > /dev/null
+		sleep 1
+		continue
+	fi
+#		usage=$(echo "scale=2;($usedslots / $maxslots) * 100"|bc)
+#		echo "Current Usage: $usage%" >> $logfile
+#		echo >> $logfile
+#		sleep 15 
+	echo -e "Cluster at capacity of $cap%" >> $logfile
+	sleep 2
+done
