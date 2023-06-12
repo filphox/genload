@@ -1,5 +1,12 @@
 #!/bin/bash
 
+# Author: Phil Fox
+# Description: Create real load on an LSF cluster (requires stress-ng)
+
+# History:
+# Jan 2023: Initial version
+# May 2023: Added print_usage function
+
 function get_item {
 
 	local dbfile="$configdir/$1.db"
@@ -112,8 +119,6 @@ function update_config {
 		echo -e "\nInvalid selection"
 	done
 
-
-	
 }
 
 function create_db {
@@ -168,6 +173,44 @@ function scan_config {
 	esac
 	create_db "$1"
 }
+
+function print_usage {
+
+	cat <<-EOF
+	Usage: genload [start|stop]
+	       genload [OPTION]
+	       genload CAP%
+
+	 Start / stop the service:
+	  start, --start           start the daemon
+	  stop, --stop             stop the daemon
+
+	 Options:
+	  -h, help                 print this usage information
+	  -p, profile              select which application profiles to use
+	  -u, user                 select which user(s) to run jobs as
+	  -s, slot                 specify the size of jobs by job slot
+	  -r, runtime              select the job runtime
+	  -q, queue                specify which queues to submit jobs to
+
+	 Examples:
+	  To start the daemon
+	  genload start
+
+	  To load the cluster up to 50% of capacity
+	  genload 50
+
+	  To overload the cluster, creating pending jobs
+	  genload 120
+
+	  To view the current capacity and daemon status
+	  genload
+
+	  To change which users jobs are submitted as
+	  genload -u
+	
+	EOF
+}
 	
 
 #
@@ -205,6 +248,11 @@ then
 fi
 
 case $1 in
+
+	"-h" | "--help" | "help")
+		print_usage
+		exit 0
+		;;
 
 	"--start" | "start")
 		if [ -f "$pidfile" ]
@@ -288,9 +336,9 @@ esac
 #echo "Daemon started"
 echo $$ > $pidfile
 
-maxslots=$(bhosts|tail -n +2|awk '{print $4}'|paste -sd+|bc)
 while true
 do
+	maxslots=$(bhosts|tail -n +2|awk '{print $4}'|paste -sd+|bc)
 	cap=$(cat $capfile)
 	targetslots=$(echo "$maxslots * $cap / 100" | bc)
 	usedslots=$(bqueues | tail -n +2 | awk '{print $8}' | paste -sd+ | bc)
@@ -309,6 +357,7 @@ do
 		queue=$(get_item "queues")
 		user=$(get_item "users")
 		runtime=$(get_item "runtimes")
+		#runuser -l "$user" -c "bsub -o /tmp/genload.out -e /tmp/genload.err -app $profile -n $slots -q $queue -We $runtime runload $runtime" >> $logfile 
 		runuser -l "$user" -c "bsub -app $profile -n $slots -q $queue -We $runtime runload $runtime" > /dev/null
 		sleep 1
 		continue
