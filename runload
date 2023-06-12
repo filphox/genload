@@ -1,27 +1,13 @@
 #!/bin/bash
 
-# Default runtime
-runtime=15
-
-if [ ! -z "$1" ]
-then
-	runtime=$1
-fi
-
-if [ ! -z "$GL_RUNTIME" ]
-then
-	runtime="$GL_RUNTIME" 
-fi
-
-#echo $(hostname)
-#env
-
-#echo stress-ng --cpu 4 --io 1 --vm 1 --vm-bytes 256M --timeout ${timeout}m
-#stress-ng --cpu 4 --io 1 --vm 1 --vm-bytes 256M --timeout ${timeout}m
 #stress-ng --cpu 1 --io 1 --vm 1 --vm-bytes 256M --timeout 30s
-[ -z "$GL_CPU" ] && GL_CPU="1"
-[ -z "$GL_CPULOAD" ] && GL_CPULOAD="100"
-[ ! -z "$GL_IO" ] && GL_IO="--io $GL_IO"
+GL_RUNTIME=$1
+[ -z "$GL_RUNTIME" ] && GL_RUNTIME='15'
+[ -z "$GL_CPU" ] && GL_CPU='1'
+[ -z "$GL_CPULOAD" ] && GL_CPULOAD='100'
+[ -z "$GL_IO" ] && GL_IO='1'
+[ -z "$GL_VM" ] && GL_VM='1'
+[ -z "$GL_MEM" ] && GL_MEM='256'
 
 #stress-ng --cpu $GL_CPU --io $GL_IO --vm $GL_VM --vm-bytes ${GL_MEM}M --timeout ${runtime}m
-stress-ng --cpu $GL_CPU --cpu-load 100 $GL_IO --vm $GL_VM --vm-bytes ${GL_MEM}M --timeout ${runtime}m
+stress-ng --cpu $GL_CPU --cpu-load $GL_CPULOAD --io $GL_IO --vm $GL_VM --vm-bytes ${GL_MEM}M --timeout ${GL_RUNTIME}m
