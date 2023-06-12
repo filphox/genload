@@ -224,6 +224,14 @@ then
 	exit 1
 fi
 
+admin=$(grep -i ^administrators $LSF_ENVDIR/lsf.cluster.* | awk '{print $3}')
+runuser -l $admin -c bhosts > /dev/null
+if [ $? -ne 0 ]
+then
+	echo "Error: Unable to run commands as primary LSF administrator: $admin"
+	exit 1
+fi
+
 # Create config dir
 genloaddir="$HOME/.genload"
 configdir="$genloaddir/$clustername"
@@ -322,6 +330,7 @@ case $1 in
 		else
 			echo "Daemon is not running"
 		fi
+		echo "Primary admin: $admin"
 		echo "Load generation at $(cat $capfile)%"
 		exit 0
 		;;
@@ -338,10 +347,10 @@ echo $$ > $pidfile
 
 while true
 do
-	maxslots=$(bhosts|tail -n +2|awk '{print $4}'|paste -sd+|bc)
+	maxslots=$(runuser -l $admin -c bhosts|tail -n +2|awk '{print $4}'|paste -sd+|bc)
 	cap=$(cat $capfile)
 	targetslots=$(echo "$maxslots * $cap / 100" | bc)
-	usedslots=$(bqueues | tail -n +2 | awk '{print $8}' | paste -sd+ | bc)
+	usedslots=$(runuser -l $admin -c bqueues | tail -n +2 | awk '{print $8}' | paste -sd+ | bc)
 
 	slots=$(get_item "slots")
 	echo "Slots = $slots">> $logfile
@@ -358,7 +367,7 @@ do
 		user=$(get_item "users")
 		runtime=$(get_item "runtimes")
 		#runuser -l "$user" -c "bsub -o /tmp/genload.out -e /tmp/genload.err -app $profile -n $slots -q $queue -We $runtime runload $runtime" >> $logfile 
-		runuser -l "$user" -c "bsub -app $profile -n $slots -q $queue -We $runtime runload $runtime" > /dev/null
+		runuser -l $user -c "bsub -app $profile -n $slots -q $queue -We $runtime blaunch runload $runtime" > /dev/null
 		sleep 1
 		continue
 	fi
