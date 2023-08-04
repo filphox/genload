@@ -4,8 +4,20 @@
 # Description: Create real load on an LSF cluster (requires stress-ng)
 
 # History:
-# Jan 2023: Initial version
-# May 2023: Added print_usage function
+# Jan 2023    : Initial version
+# May 2023    : Added print_usage function
+# Jun 15 2023 : Improved the scheduling function and switched from % capacity to slots
+#             : Improved the logging function, implemented none, info, debug and stdout levels
+#             : Added RES_REQ=rusage[mem=xxx] to the application profiles
+# Aug 3 2023  : Added checks for LIM and MBATCHD at the start of each cycle, just in case
+#             : LSF goes down whilst genload is still running
+
+# LOGLEVEL: none info debug stdout
+LOGLEVEL='debug'
+
+# Each cycle check how much workload is running and submit more workload
+# if required. Then wait CYCLE seconds before doing it all again.
+CYCLE=20
 
 function get_item {
 
@@ -101,9 +113,9 @@ function update_config {
 	do
 		echo -e "\nSelect $title:"
 		display_config "$1"
-    	printf "\n%4s. %s\n\n" "q" "quit"
+	    	printf "\n%4s. %s\n\n" "q" "quit"
 		read -r -p "Enable/disable $title [1-$count] or quit [q]? " choice
-		if [ "$choice" = "q" ] || [ $choice = "Q" ]
+		if [ -z "$choice" ] || [ "$choice" = "q" ] || [ $choice = "Q" ]
 		then
 			#echo Quitting
 			exit 0
@@ -134,7 +146,7 @@ function scan_config {
 	case $1 in
 
 		"profiles")
-			bapp | grep gl_ | awk '{print $1}' > "$cfgfile"
+			runuser -l $admin -c bapp | grep gl_ | awk '{print $1}' > "$cfgfile"
 			;;
 
 		"users")
@@ -142,7 +154,7 @@ function scan_config {
 			;;
 
 		"slots")
-			local maxslots=$(bhosts|tail -n +2|awk '{print $4}'|paste -sd+|bc)
+			local maxslots=$(runuser -l $admin -c bhosts | tail -n +2 | awk '{print $4}' | paste -sd+ | bc)
 			local slotcount=1
 			
 			rm -f "$cfgfile"
@@ -168,9 +180,11 @@ function scan_config {
 			;;
 
 		"queues")
-			bqueues | tail -n+2 | awk '{print $1}' > $cfgfile
+			runuser -l $admin -c bqueues | tail -n+2 | awk '{print $1}' > $cfgfile
 			;;
 	esac
+
+	log "creating database for $1"
 	create_db "$1"
 }
 
@@ -179,7 +193,7 @@ function print_usage {
 	cat <<-EOF
 	Usage: genload [start|stop]
 	       genload [OPTION]
-	       genload CAP%
+	       genload SLOTS
 
 	 Start / stop the service:
 	  start, --start           start the daemon
@@ -197,21 +211,61 @@ function print_usage {
 	  To start the daemon
 	  genload start
 
-	  To load the cluster up to 50% of capacity
-	  genload 50
-
-	  To overload the cluster, creating pending jobs
-	  genload 120
-
 	  To view the current capacity and daemon status
 	  genload
 
+	  To load a 16 slot cluster to 50%
+	  genload 8
+
+	  To load a 32 slot cluster to 100%
+	  genload 32
+
+	  To overload a 32 slot cluster, creating pending jobs
+	  genload 40
+
 	  To change which users jobs are submitted as
 	  genload -u
+
+	  To change how many slots jobs can use
+	  genload -s
 	
 	EOF
 }
+
+function info {
 	
+	if [ "$LOGLEVEL" != 'none' ]
+	then
+		log "$1"
+	fi
+}
+
+function debug {
+
+	if [ "$LOGLEVEL" = 'debug' ] || [ "$LOGLEVEL" = 'stdout' ]
+	then
+		log "$1"
+	fi
+}
+
+function log {
+
+	if [ -z "$instance" ]
+	then
+		suffix=''
+	else
+		suffix="-${instance}"
+	fi
+
+	msg="$(date) $(hostname): genload${suffix}: $1"
+	echo -e "$msg" >> $logfile
+
+	if [ "$LOGLEVEL" = "stdout" ]
+	then
+		echo -e "$msg"
+	fi
+}
+
 
 #
 # MAIN
@@ -220,7 +274,8 @@ function print_usage {
 clustername=$(lsid | grep "My cluster" | awk '{print $NF}')
 if [ $? -ne 0 ]
 then
-	echo "Error: Cannot query LSF cluster"
+	LOGLEVEL='stdout'
+	info "Error: Cannot query LSF cluster"
 	exit 1
 fi
 
@@ -228,34 +283,60 @@ admin=$(grep -i ^administrators $LSF_ENVDIR/lsf.cluster.* | awk '{print $3}')
 runuser -l $admin -c bhosts > /dev/null
 if [ $? -ne 0 ]
 then
-	echo "Error: Unable to run commands as primary LSF administrator: $admin"
+	LOGLEVEL='stdout'
+	info "Error: Unable to run commands as primary LSF administrator: $admin"
 	exit 1
+fi
+
+# Allow multiple instances of genload on one host
+if [ "$1" = '-c' ]
+then
+	config="$2"
+	cmd="$3"
+else
+	config='default'
+	cmd="$1"
 fi
 
 # Create config dir
 genloaddir="$HOME/.genload"
-configdir="$genloaddir/$clustername"
-scriptdir="$genloaddir/scripts"
+configdir="$genloaddir/$clustername/$config"
+#scriptdir="$genloaddir/scripts"
+logdir="$genloaddir/$clustername/log"
 pidfile="$configdir/pidfile"
 capfile="$configdir/capfile"
-logfile="$configdir/logfile"
-mkdir -p $configdir $scriptdir
+insfile="$configdir/instance"
+logfile="$logdir/genload.log"
+mkdir -p $configdir $logdir
 
 # Create configuration
 items=('profiles' 'slots' 'users' 'runtimes' 'queues')
 for item in "${items[@]}"
 do
+	#debug "creating config for $item"
 	[ ! -f "$configdir/$item.conf" ] || [ ! -f "$configdir/$item.db" ] && scan_config $item
 done
 
+# Set instance number
+if [ -f "$insfile" ]
+then
+	instance="$(cat $insfile)"
+else
+	inscount=$(find $genloaddir -name instance | wc -l)
+	instance=$((inscount + 1))
+	echo $instance > $insfile
+	info "first run, setting instance id to $instance"
+fi
 
-# Set default capacity to 0% on first run
+# Set default capacity to 0 slots on first run
 if [ ! -f "$capfile" ]
 then
 	echo 0 > "$capfile"		
+	info "first run, setting capacity to 0 slots"
 fi
 
-case $1 in
+
+case $cmd in
 
 	"-h" | "--help" | "help")
 		print_usage
@@ -265,24 +346,31 @@ case $1 in
 	"--start" | "start")
 		if [ -f "$pidfile" ]
 		then
-			echo "Daemon is already running"
+			echo "daemon is already running"
 			exit 1
 		fi
-		$0 --daemon &
-		echo "Daemon started"
-		exit 0
+		$0 -c $config --daemon &
+		if [ $? -eq 0 ]
+		then
+			echo "daemon started"
+			exit 0	
+		else
+			echo "daemon failed to start"
+			exit 1
+		fi
 		;;
 
 	"--stop" | "stop")
 		if [ -f "$pidfile" ]
 		then
-			echo "Stopping daemon"
+			echo "stopping daemon"
 			pid=$(cat $pidfile)
 			kill -9 $pid
 			[ $? -eq 0 ] && rm -f "$pidfile"
+			log "\e[1m$config\e[0m: daemon has stopped"
 			exit 0
 		else
-			echo "Daemon is not running"
+			echo "daemon is not running"
 			exit 1
 		fi
 		;;
@@ -290,15 +378,16 @@ case $1 in
 	"--daemon")
 		if [ -f "$pidfile" ]
 		then
-			echo "Daemon is already running"
+			echo "daemon is already running"
 			exit 1
 		fi
-		#continue
 		;;
 
 	[0-9] | [0-9][0-9] | [0-9][0-9][0-9] )
-		echo $1 > $capfile
-		echo "Load generation set to $1%"
+		echo $cmd > $capfile
+		echo -e "\e[1m$config\e[0m"
+		echo "setting load to $cmd slots"
+		debug "setting load to $cmd slots"
 		exit 0
 		;;
 
@@ -323,15 +412,16 @@ case $1 in
 		;;
 
 	"")
+		echo -e "\e[1m$config\e[0m"
 		if [ -f "$pidfile" ]
 		then
 			pid=$(cat $pidfile)
-			echo "Daemon is running (PID: $pid)"
+			echo "daemon: running with PID $pid"
 		else
-			echo "Daemon is not running"
+			echo "daemon: not running"
 		fi
-		echo "Primary admin: $admin"
-		echo "Load generation at $(cat $capfile)%"
+		echo "admin: $admin"
+		echo "load: $(cat $capfile) slot(s)"
 		exit 0
 		;;
 
@@ -342,39 +432,99 @@ case $1 in
 
 esac	
 
-#echo "Daemon started"
+# Capture PID of current process for monitor/control purposes
 echo $$ > $pidfile
+log "\e[1m$config\e[0m: daemon started, PID $$, instance $instance"
 
 while true
 do
-	maxslots=$(runuser -l $admin -c bhosts|tail -n +2|awk '{print $4}'|paste -sd+|bc)
-	cap=$(cat $capfile)
-	targetslots=$(echo "$maxslots * $cap / 100" | bc)
-	usedslots=$(runuser -l $admin -c bqueues | tail -n +2 | awk '{print $8}' | paste -sd+ | bc)
-
-	slots=$(get_item "slots")
-	echo "Slots = $slots">> $logfile
-
-	if [ $((usedslots + slots)) -le $targetslots ]
+	debug "checking for LIM"
+	ps -ef | grep [l]im 2>&1 > /dev/null
+	if [ $? -ne 0 ]
 	then
-		echo "Capacity: $cap%" >> $logfile
-		echo "Max Slots: $maxslots" >> $logfile
-		echo "Target Slots: $targetslots" >> $logfile
-		echo "Used Slots: $usedslots" >> $logfile
-		echo >> $logfile
+		debug "LIM not running, sleeping for $CYCLE seconds"
+		sleep $CYCLE
+		continue
+	fi
+
+	debug "checking for MBATCHD"
+	ps -ef | grep [m]batchd 2>&1 > /dev/null
+	if [ $? -ne 0 ]
+	then
+		debug "MBATCHD not running, sleeping for $CYCLE seconds"
+		sleep $CYCLE
+		continue
+	fi
+
+	slotretry=5
+	cap=$(cat $capfile)
+	debug "requested $cap slots of workload"
+
+	# Scan for genload workload (pending and running)
+	debug "scanning for genload workload (pending and running)"
+	runslots=$(runuser -l $admin -c "bjobs -uall -J gl_${instance}_* -o nreq_slot -noheader 2>&1")
+
+	if echo "$runslots" | grep '-' > /dev/null
+	then
+		debug "found hypen, workload not registered yet, sleep for 1s"
+		sleep 1
+		continue
+	fi
+
+	if echo "$runslots" | grep "not found" > /dev/null
+	then 
+		debug "no workload found"
+		runslots=0
+	else
+		runslots=$(echo "$runslots" | paste -sd+ | bc)
+	fi
+	debug "found $runslots slot(s) of genload workload"
+
+	# How many slots need workload
+	availslots=$((cap - runslots))
+	debug "$availslots available slot(s) for new workload"
+	[ $availslots -le 0 ] && slotretry=0
+
+	while [ $slotretry -gt 0 ]
+	do
+		debug "$slotretry retries left"
+		# Get a random slot count for the job
+		slots=$(get_item "slots")
+		debug "random slot count is $slots"
+		debug "trying a $slots slot job"
+
+		# Make sure the job is small enough to fit in the available slots
+		if [ $slots -gt $availslots ]
+		then
+			slotretry=$((slotretry - 1))
+			debug "job too big, trying again"
+			continue
+		fi
+
+		# Get random profile / queue / user and runtime, then submit to LSF
 		profile=$(get_item "profiles")
 		queue=$(get_item "queues")
 		user=$(get_item "users")
 		runtime=$(get_item "runtimes")
-		#runuser -l "$user" -c "bsub -o /tmp/genload.out -e /tmp/genload.err -app $profile -n $slots -q $queue -We $runtime runload $runtime" >> $logfile 
-		runuser -l $user -c "bsub -app $profile -n $slots -q $queue -We $runtime blaunch runload $runtime" > /dev/null
-		sleep 1
-		continue
-	fi
-#		usage=$(echo "scale=2;($usedslots / $maxslots) * 100"|bc)
-#		echo "Current Usage: $usage%" >> $logfile
-#		echo >> $logfile
-#		sleep 15 
-	echo -e "Cluster at capacity of $cap%" >> $logfile
-	sleep 2
+		jobname="gl_${instance}_${profile:3}_${runtime}"
+
+		debug "job name: $jobname, user: $user, queue: $queue, slots: $slots, runtime: $runtime"
+
+		# Submit the job to LSF
+		#bsubcmd="bsub -app $profile -n $slots -q $queue -We $runtime blaunch runload $runtime"
+		debug "submitting job to LSF"
+		bsubcmd="bsub -J $jobname -app $profile -n $slots -q $queue -We $runtime blaunch runload $runtime"
+		debug "$bsubcmd"
+		bsubout="$(runuser -l $user -c "$bsubcmd" 2>&1)"
+		debug "$bsubout"
+		#log "$bsubout"
+
+		availslots=$((availslots - slots))
+		[ $availslots -le 0 ] && slotretry=0
+		debug "$availslots slot(s) left for new workload"
+	done
+
+	debug "sleeping for $CYCLE seconds until next cycle"
+	sleep $CYCLE
+
 done
