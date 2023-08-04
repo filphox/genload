@@ -96,7 +96,7 @@ function display_config {
 		else
 			state=" "
 		fi
-        printf "%4d. [%s] %s\n" "$idx" "$state" "${array[1]}"
+		printf "%4d. [%s] %s\n" "$idx" "$state" "${array[1]}"
 
 	done < "$dbfile"
 }
