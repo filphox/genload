@@ -15,6 +15,8 @@
 #             : Improved logging, added warning and error functions
 #             : Commented all the code 
 #             : Tidied up the 'profile' related code
+#             : Added 'genload restart' option
+# Aug 4 2023  : Added support for Spectrum LSF Data Manager
 
 # LOGLEVEL: none info debug stdout
 #LOGLEVEL='stdout'
@@ -127,7 +129,11 @@ function update_config {
 			;;
 
 		'queues')
-			title="queues"
+			title='queues'
+			;;
+		
+		'datafiles')
+			title='data files for Data Manager jobs'
 			;;
 	esac
 
@@ -159,7 +165,6 @@ function update_config {
 		echo -e '\nInvalid selection'
 		sleep 1
 	done
-
 }
 
 
@@ -184,11 +189,19 @@ function scan_config {
 		'apps')
 			# Grab application profiles from LSF that stat with 'gl_'
 			runuser -l $admin -c bapp | grep gl_ | awk '{print $1}' > "$cfgfile"
+			if [ $(cat $cfgfile | wc -l) -eq 0 ]
+			then
+				error 'genload requires at least one application profile named gl_<some_application_name>, e.g. gl_matlab'
+			fi
 			;;
 
 		'users')
 			# Grab LSF users by looking at home directories
 			ls /home | grep -v 'lost+found' > "$cfgfile"
+			if [ $(cat $cfgfile | wc -l) -eq 0 ]
+			then
+				error 'genload requires at least one user defined in shared /home to run'
+			fi
 			;;
 
 		'slots')
@@ -224,12 +237,50 @@ function scan_config {
 		'queues')
 			# Grab list of available queues from LSF
 			runuser -l $admin -c bqueues | tail -n+2 | awk '{print $1}' > $cfgfile
+			if [ $(cat $cfgfile | wc -l) -eq 0 ]
+			then
+				error 'genload requires at least one queue to submit workload to'
+			fi
+			;;
+
+		'datafiles')
+			# Hard coded list of different sized datafiles for use 
+			# with Data Manager workload
+			cat > "$cfgfile" <<-EOF
+			datafile_1_MB
+			datafile_16_MB
+			datafile_32_MB
+			datafile_128_MB
+			datafile_256_MB
+			datafile_512_MB
+			datafile_1024_MB
+			EOF
 			;;
 	esac
 
 	log "creating database for $1"
 	create_db "$1"
 }
+
+
+# Function to create internal data files for use with
+# Data Manager workload (if enabled)
+function create_datafiles {
+
+	sizes=('1' '16' '32' '128' '256' '512' '1024')
+
+	for size in "${sizes[@]}"
+	do
+		datafile="$configdir/datafile_${size}_MB"
+		if [ ! -f "$datafile" ]
+		then
+			# Create a data file with random garbage
+			debug "creating datafile_${size}_MB"
+			head -c ${size}M /dev/urandom > "$datafile"
+		fi
+	done
+}
+
 
 # Function to print out command usage information.
 function print_usage {
@@ -240,16 +291,18 @@ function print_usage {
 	       genload [-p <profile>] SLOTS
 
 	 Start / stop the service:
-	  start, --start           start the daemon
-	  stop, --stop             stop the daemon
+	  start, --start           start daemon
+	  stop, --stop             stop daemon
+	  restart, --restart       restart daemon
 
 	 Options:
 	  -h, help                 print this usage information
 	  -a, apps                 select which application profiles to use
-	  -u, user                 select which user(s) to run jobs as
-	  -s, slot                 specify the size of jobs by job slot
-	  -r, runtime              select the job runtime
+	  -d, datafile             select data files for Data Manager jobs
 	  -q, queue                specify which queues to submit jobs to
+	  -r, runtime              select the job runtime
+	  -s, slot                 specify the size of jobs by job slot
+	  -u, user                 select which user(s) to run jobs as
 
 	  -p <profile>             run genload with the specified profile
 	  -l                       list available profiles
@@ -287,7 +340,8 @@ function print_usage {
 function error {
 
 	echo "error: $1"
-	log "error: $1"
+	[ -n "$logfile" ] && log "error: $1"
+	exit 1
 }
 
 
@@ -323,13 +377,6 @@ function debug {
 # logfile when loglevel is info or debug.
 function log {
 
-	if [ -z "$instance" ]
-	then
-		suffix=''
-	else
-		suffix="-${instance}"
-	fi
-
 	msg="$(date) $(hostname): \e[1m$profile\e[0m: $1"
 	echo -e "$msg" >> $logfile
 
@@ -347,31 +394,27 @@ function log {
 # Has the LSF profile been sourced
 if [ -z $LSF_ENVDIR ]
 then
-	echo 'warning: LSF profile has not been sourced'
-	exit 1
+	error 'LSF profile has not been sourced'
 fi
 
 # Couple sanity checks to confirm LIM and MBATCHD are even running
 ps -ef | grep [l]im 2>&1 > /dev/null
 if [ $? -ne 0 ]
 then
-    echo 'warning: LIM not running, exiting'
-	exit 1
+	error 'LIM not running, exiting'
 fi
 
 ps -ef | grep [m]batchd 2>&1 > /dev/null
 if [ $? -ne 0 ]
 then
-	echo 'warning: MBATCHD not running, exiting'
-	exit 1
+	error 'MBATCHD not running, exiting'
 fi
 
 # Finally run a command against the cluster, timeout and fail after 10 seconds
 clustername=$(timeout 10 lsid | grep "My cluster" | awk '{print $NF}')
 if [ $? -ne 0 ]
 then
-	echo 'error: cannot query LSF cluster'
-	exit 1
+	error 'cannot query LSF cluster'
 fi
 
 # Get the LSF administrator to run all future LSF commands
@@ -379,8 +422,7 @@ admin=$(grep -i ^administrators $LSF_ENVDIR/lsf.cluster.* | awk '{print $3}')
 runuser -l $admin -c bhosts > /dev/null
 if [ $? -ne 0 ]
 then
-	echo "error: unable to run commands as primary LSF administrator: $admin"
-	exit 1
+	error "unable to run commands as primary LSF administrator: $admin"
 fi
 
 # Allow multiple instances of genload on one host, -p sets a profile name
@@ -390,7 +432,7 @@ then
 	cmd="$3"
 	if [ -z "$2" ]
 	then
-		echo 'error: no profile specified'
+		error 'no profile specified'
 		exit 1
 	fi
 else
@@ -410,23 +452,11 @@ logfile="$logdir/genload.log"
 mkdir -p $configdir $logdir
 
 # Create configuration
-items=('apps' 'slots' 'users' 'runtimes' 'queues')
+items=('apps' 'slots' 'users' 'runtimes' 'queues' 'datafiles')
 for item in "${items[@]}"
 do
 	[ ! -f "$configdir/$item.conf" ] || [ ! -f "$configdir/$item.db" ] && scan_config $item
 done
-
-## Set instance number. If running multiple copies of genload each one has an instance
-## number to help differentiate their workload in the cluster
-#if [ -f "$insfile" ]
-#then
-#	instance="$(cat $insfile)"
-#else
-#	inscount=$(find $genloaddir -name instance | wc -l)
-#	instance=$((inscount + 1))
-#	echo $instance > $insfile
-#	info "first run, setting instance id to $instance"
-#fi
 
 # Set default capacity to 0 slots on first run
 if [ ! -f "$capfile" ]
@@ -475,6 +505,13 @@ case $cmd in
 		fi
 		;;
 
+	'--restart' | 'restart')
+		genload -p "$profile" stop
+		sleep 1
+		genload -p "$profile" start
+		exit $?
+		;;
+
 	'--daemon')
 		if [ -f "$pidfile" ]
 		then
@@ -495,16 +532,20 @@ case $cmd in
 		update_config 'apps'
 		;;
 
-	'-u' | 'user' | 'users')
-		update_config "users"
+	'-d' | 'datafile' | 'datafiles')
+		update_config 'datafiles'
+		;;
+
+	'-r' | 'runtime' | 'runtimes')
+		update_config 'runtimes'
 		;;
 
 	'-s' | 'slot' | 'slots')
 		update_config 'slots'
 		;;
 
-	'-r' | 'runtime' | 'runtimes')
-		update_config 'runtimes'
+	'-u' | 'user' | 'users')
+		update_config "users"
 		;;
 
 	'-q' | 'queue' | 'queues')
@@ -543,7 +584,10 @@ esac
 
 # Capture PID of current process for monitor/control purposes
 echo $$ > $pidfile
-log "daemon started, PID $$, profile $profile"
+log "daemon started, PID $$, profile \e[1m$profile\e[0m"
+
+# Check/create data files for use with LSF Data Manager if enabled
+create_datafiles
 
 # Start an infinite loop for the daemon
 while true
