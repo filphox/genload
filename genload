@@ -14,10 +14,11 @@
 # Aug 4 2023  : Updated the menu view, screen clears in between updates now
 #             : Improved logging, added warning and error functions
 #             : Commented all the code 
+#             : Tidied up the 'profile' related code
 
 # LOGLEVEL: none info debug stdout
-LOGLEVEL='stdout'
-#LOGLEVEL='debug'
+#LOGLEVEL='stdout'
+LOGLEVEL='debug'
 
 # Each cycle check how much workload is running and submit more workload
 # if required. Then wait CYCLE seconds before doing it all again.
@@ -109,23 +110,23 @@ function update_config {
 	# Set the title depending on which .db is being updated
 	case $1 in
 
-		"profiles")
-			title="application profiles"
+		'apps')
+			title='application profiles'
 			;;
 		
-		"users")
-			title="users"
+		'users')
+			title='users'
 			;;
 
-		"slots")
-			title="job slots"
+		'slots')
+			title='job slots'
 			;;
 
-		"runtimes")
-			title="job run duration"
+		'runtimes')
+			title='job run duration'
 			;;
 
-		"queues")
+		'queues')
 			title="queues"
 			;;
 	esac
@@ -155,7 +156,7 @@ function update_config {
 				continue
 			fi
 		fi
-		echo -e "\nInvalid selection"
+		echo -e '\nInvalid selection'
 		sleep 1
 	done
 
@@ -177,19 +178,20 @@ function scan_config {
 
 	local cfgfile="$configdir/$1.conf"
 
+	debug "creating config for $1"
 	case $1 in
 
-		"profiles")
+		'apps')
 			# Grab application profiles from LSF that stat with 'gl_'
 			runuser -l $admin -c bapp | grep gl_ | awk '{print $1}' > "$cfgfile"
 			;;
 
-		"users")
+		'users')
 			# Grab LSF users by looking at home directories
-			ls /home > "$cfgfile"
+			ls /home | grep -v 'lost+found' > "$cfgfile"
 			;;
 
-		"slots")
+		'slots')
 			# Generate a list of slot counts, power of 2, less than maximum avail slots
 			local maxslots=$(runuser -l $admin -c bhosts | tail -n +2 | awk '{print $4}' | paste -sd+ | bc)
 			local slotcount=1
@@ -205,7 +207,7 @@ function scan_config {
 			echo "$maxslots" >> "$cfgfile"
 			;;
 
-		"runtimes")
+		'runtimes')
 			# Hard coded list of available runtimes
 			cat > "$cfgfile" <<-EOF
 			1
@@ -219,7 +221,7 @@ function scan_config {
 			EOF
 			;;
 
-		"queues")
+		'queues')
 			# Grab list of available queues from LSF
 			runuser -l $admin -c bqueues | tail -n+2 | awk '{print $1}' > $cfgfile
 			;;
@@ -233,9 +235,9 @@ function scan_config {
 function print_usage {
 
 	cat <<-EOF
-	Usage: genload [start|stop]
-	       genload [OPTION]
-	       genload SLOTS
+	Usage: genload [-p <profile>] [start|stop]
+	       genload [-p <profile>] [OPTION]
+	       genload [-p <profile>] SLOTS
 
 	 Start / stop the service:
 	  start, --start           start the daemon
@@ -243,11 +245,14 @@ function print_usage {
 
 	 Options:
 	  -h, help                 print this usage information
-	  -p, profile              select which application profiles to use
+	  -a, apps                 select which application profiles to use
 	  -u, user                 select which user(s) to run jobs as
 	  -s, slot                 specify the size of jobs by job slot
 	  -r, runtime              select the job runtime
 	  -q, queue                specify which queues to submit jobs to
+
+	  -p <profile>             run genload with the specified profile
+	  -l                       list available profiles
 
 	 Examples:
 	  To start the daemon
@@ -270,6 +275,9 @@ function print_usage {
 
 	  To change how many slots jobs can use
 	  genload -s
+
+	  Start a daemon with a new profile
+	  genload -p cloud start
 	
 	EOF
 }
@@ -322,7 +330,7 @@ function log {
 		suffix="-${instance}"
 	fi
 
-	msg="$(date) $(hostname): genload${suffix}: $1"
+	msg="$(date) $(hostname): \e[1m$profile\e[0m: $1"
 	echo -e "$msg" >> $logfile
 
 	if [ "$LOGLEVEL" = "stdout" ]
@@ -335,6 +343,13 @@ function log {
 #
 # MAIN
 #
+
+# Has the LSF profile been sourced
+if [ -z $LSF_ENVDIR ]
+then
+	echo 'warning: LSF profile has not been sourced'
+	exit 1
+fi
 
 # Couple sanity checks to confirm LIM and MBATCHD are even running
 ps -ef | grep [l]im 2>&1 > /dev/null
@@ -368,19 +383,24 @@ then
 	exit 1
 fi
 
-# Allow multiple instances of genload on one host
-if [ "$1" = '-c' ]
+# Allow multiple instances of genload on one host, -p sets a profile name
+if [ "$1" = '-p' ]
 then
-	config="$2"
+	profile="$2"
 	cmd="$3"
+	if [ -z "$2" ]
+	then
+		echo 'error: no profile specified'
+		exit 1
+	fi
 else
-	config='default'
+	profile='default'
 	cmd="$1"
 fi
 
 # Create config dir
 genloaddir="$HOME/.genload"
-configdir="$genloaddir/$clustername/$config"
+configdir="$genloaddir/$clustername/$profile"
 #scriptdir="$genloaddir/scripts"
 logdir="$genloaddir/$clustername/log"
 pidfile="$configdir/pidfile"
@@ -390,24 +410,23 @@ logfile="$logdir/genload.log"
 mkdir -p $configdir $logdir
 
 # Create configuration
-items=('profiles' 'slots' 'users' 'runtimes' 'queues')
+items=('apps' 'slots' 'users' 'runtimes' 'queues')
 for item in "${items[@]}"
 do
-	#debug "creating config for $item"
 	[ ! -f "$configdir/$item.conf" ] || [ ! -f "$configdir/$item.db" ] && scan_config $item
 done
 
-# Set instance number. If running multiple copies of genload each one has an instance
-# number to help differentiate their workload in the cluster
-if [ -f "$insfile" ]
-then
-	instance="$(cat $insfile)"
-else
-	inscount=$(find $genloaddir -name instance | wc -l)
-	instance=$((inscount + 1))
-	echo $instance > $insfile
-	info "first run, setting instance id to $instance"
-fi
+## Set instance number. If running multiple copies of genload each one has an instance
+## number to help differentiate their workload in the cluster
+#if [ -f "$insfile" ]
+#then
+#	instance="$(cat $insfile)"
+#else
+#	inscount=$(find $genloaddir -name instance | wc -l)
+#	instance=$((inscount + 1))
+#	echo $instance > $insfile
+#	info "first run, setting instance id to $instance"
+#fi
 
 # Set default capacity to 0 slots on first run
 if [ ! -f "$capfile" ]
@@ -419,88 +438,94 @@ fi
 # Parse command line options, options cannot be combined
 case $cmd in
 
-	"-h" | "--help" | "help")
+	'-h' | '--help' | 'help')
 		print_usage
 		exit 0
 		;;
 
-	"--start" | "start")
+	'--start' | 'start')
 		if [ -f "$pidfile" ]
 		then
-			echo "daemon is already running"
+			echo 'daemon is already running'
 			exit 1
 		fi
-		$0 -c $config --daemon &
+		$0 -p $profile --daemon &
 		if [ $? -eq 0 ]
 		then
-			echo "daemon started"
+			echo 'daemon started'
 			exit 0	
 		else
-			echo "daemon failed to start"
+			echo 'daemon failed to start'
 			exit 1
 		fi
 		;;
 
-	"--stop" | "stop")
+	'--stop' | 'stop')
 		if [ -f "$pidfile" ]
 		then
-			echo "stopping daemon"
+			echo 'stopping daemon'
 			pid=$(cat $pidfile)
 			kill -9 $pid
 			[ $? -eq 0 ] && rm -f "$pidfile"
-			log "\e[1m$config\e[0m: daemon has stopped"
+			log 'daemon has stopped'
 			exit 0
 		else
-			echo "daemon is not running"
+			echo 'daemon is not running'
 			exit 1
 		fi
 		;;
 
-	"--daemon")
+	'--daemon')
 		if [ -f "$pidfile" ]
 		then
-			echo "daemon is already running"
+			echo 'daemon is already running'
 			exit 1
 		fi
 		;;
 
 	[0-9] | [0-9][0-9] | [0-9][0-9][0-9] )
 		echo $cmd > $capfile
-		echo -e "\e[1m$config\e[0m"
+		echo -e "\e[1m$profile\e[0m"
 		echo "setting load to $cmd slots"
 		debug "setting load to $cmd slots"
 		exit 0
 		;;
 
-	"-p" | "profile" | "profiles")
-		update_config "profiles"
+	'-a' | 'app' | 'apps')
+		update_config 'apps'
 		;;
 
-	"-u" | "user" | "users")
+	'-u' | 'user' | 'users')
 		update_config "users"
 		;;
 
-	"-s" | "slot" | "slots")
-		update_config "slots"
+	'-s' | 'slot' | 'slots')
+		update_config 'slots'
 		;;
 
-	"-r" | "runtime" | "runtimes")
-		update_config "runtimes"
+	'-r' | 'runtime' | 'runtimes')
+		update_config 'runtimes'
 		;;
 
-	"-q" | "queue" | "queues")
-		update_config "queues"
+	'-q' | 'queue' | 'queues')
+		update_config 'queues'
 		;;
 
+	'-l')
+		# List available genload profiles	
+		echo -e "\e[1mprofiles\e[0m"
+		ls -1 "$genloaddir/$clustername" | grep -v log | sort
+		exit 0
+		;;
 	"")
 		# Print status report if run with no options
-		echo -e "\e[1m$config\e[0m"
+		echo -e "profile: \e[1m$profile\e[0m"
 		if [ -f "$pidfile" ]
 		then
 			pid=$(cat $pidfile)
 			echo "daemon: running with PID $pid"
 		else
-			echo "daemon: not running"
+			echo 'daemon: not running'
 		fi
 		echo "admin: $admin"
 		echo "load: $(cat $capfile) slot(s)"
@@ -518,7 +543,7 @@ esac
 
 # Capture PID of current process for monitor/control purposes
 echo $$ > $pidfile
-log "\e[1m$config\e[0m: daemon started, PID $$, instance $instance"
+log "daemon started, PID $$, profile $profile"
 
 # Start an infinite loop for the daemon
 while true
@@ -552,7 +577,7 @@ do
 
 	# Scan for genload workload (pending and running)
 	debug "scanning for genload workload (pending and running)"
-	runslots=$(runuser -l $admin -c "bjobs -uall -J gl_${instance}_* -o nreq_slot -noheader 2>&1")
+	runslots=$(runuser -l $admin -c "bjobs -uall -J gl_${profile}_* -o nreq_slot -noheader 2>&1")
 
 	if echo "$runslots" | grep '-' > /dev/null
 	then
@@ -591,17 +616,17 @@ do
 		fi
 
 		# Get random profile / queue / user and runtime, then submit to LSF
-		profile=$(get_item 'profiles')
+		app=$(get_item 'apps')
 		queue=$(get_item 'queues')
 		user=$(get_item 'users')
 		runtime=$(get_item 'runtimes')
-		jobname="gl_${instance}_${profile:3}_${runtime}"
+		jobname="gl_${profile}_${app:3}_${runtime}"
 
 		debug "job name: $jobname, user: $user, queue: $queue, slots: $slots, runtime: $runtime"
 
 		# Submit the job to LSF
 		debug "submitting job to LSF"
-		bsubcmd="bsub -J $jobname -app $profile -n $slots -q $queue -We $runtime blaunch runload $runtime"
+		bsubcmd="bsub -J $jobname -app $app -n $slots -q $queue -We $runtime blaunch runload $runtime"
 		debug "$bsubcmd"
 		bsubout="$(runuser -l $user -c "$bsubcmd" 2>&1)"
 		debug "$bsubout"
