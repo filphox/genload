@@ -11,20 +11,28 @@
 #             : Added RES_REQ=rusage[mem=xxx] to the application profiles
 # Aug 3 2023  : Added checks for LIM and MBATCHD at the start of each cycle, just in case
 #             : LSF goes down whilst genload is still running
+# Aug 4 2023  : Updated the menu view, screen clears in between updates now
+#             : Improved logging, added warning and error functions
+#             : Commented all the code 
 
 # LOGLEVEL: none info debug stdout
-LOGLEVEL='debug'
+LOGLEVEL='stdout'
+#LOGLEVEL='debug'
 
 # Each cycle check how much workload is running and submit more workload
 # if required. Then wait CYCLE seconds before doing it all again.
 CYCLE=20
 
+# Function to get a random item from a database file (*.db). First we grab
+# all the enabled items from the database file. Enabled items start with 0,
+# disabled items start with 1. From this list of enabled items we then pick
+# a random one and return it with the 'echo' command.
 function get_item {
 
 	local dbfile="$configdir/$1.db"
-	#local -n array=$2		# Use 'nameref' to return array to caller
 	local array
 
+	# Get all enabled elements from the .db file
 	while read -r line
 	do
 		element=($(echo $line | tr ':' ' '))
@@ -34,16 +42,24 @@ function get_item {
 		fi
 
 	done < $dbfile
+
 	count=${#array[@]}
 	index=$(echo $((1 + $RANDOM % $count)))
+
+	# Return random enabled element
 	echo ${array[$((index - 1))]}
 }
 
+
+# Function to toggle the status of an element in a .db file. If the line starts with
+# 0 the element is enabled, if starts with a 1 then it is disabled. This function 
+# toggles 0->1 or 1->0 and writes that back to the .db file.
 function toggle_config {
 
 	local dbfile="$configdir/$1.db"
 	local array=($(sed -n "${2}p" $dbfile | tr ':' ' '))
-	
+
+	# Toggle the element on/off	
 	if [ ${array[0]} -eq 0 ]
 	then
 		newtext="1:${array[1]}"
@@ -51,20 +67,21 @@ function toggle_config {
 		newtext="0:${array[1]}"
 	fi
 
-	#echo "Newtext: $newtext"
-
-	#sed  -e "2s/.*/${num}:${text}/" profiles.db
-	#sed -e '2s/^\(.\):\(.*\)/2:\2/' profiles.db
-
+	# Update the .db file
 	sed -i -e "${2}s/.*/${newtext}/" $dbfile
 }
 
+
+# Function to print the contents of a .db file to the screen for
+# the user to enable/disable chosen elements. If an element is
+# enabled then prefix with [X], if disabled then prefix with [ ].
 function display_config {
 
 	local dbfile="$configdir/$1.db"
 	local idx=0
 	local state=""
 	
+	# Read the .db file and print elements to stdout
 	echo
 	while read -r line
 	do
@@ -81,11 +98,15 @@ function display_config {
 	done < "$dbfile"
 }
 
+
+# Function to print out a .db file to the screen in a menu format
+# allowing the user to enable or disable each element.
 function update_config {
 
 	local dbfile="$configdir/$1.db"
 	local count=$(cat $dbfile | wc -l)
 
+	# Set the title depending on which .db is being updated
 	case $1 in
 
 		"profiles")
@@ -109,12 +130,17 @@ function update_config {
 			;;
 	esac
 
+	# Display a menu of items with checkboxes
 	while true
 	do
+		clear
 		echo -e "\nSelect $title:"
 		display_config "$1"
-	    	printf "\n%4s. %s\n\n" "q" "quit"
+		printf "\n%4s. %s\n\n" "q" "quit"
+
+		# Get input from user
 		read -r -p "Enable/disable $title [1-$count] or quit [q]? " choice
+
 		if [ -z "$choice" ] || [ "$choice" = "q" ] || [ $choice = "Q" ]
 		then
 			#echo Quitting
@@ -124,21 +150,29 @@ function update_config {
 		then
 			if [ $choice -ge 1 ] && [ $choice -le $count ]
 			then
+				# Valid choice, update config
 				toggle_config "$1" "$choice"
 				continue
 			fi
 		fi
 		echo -e "\nInvalid selection"
+		sleep 1
 	done
 
 }
 
+
+# Function to take the .conf file which contains the raw list of options and
+# create a .db file with each item preceded by a 0, indicating that it's enabled.
 function create_db {
 
 	local dbname="$configdir/$1"
 	sed 's/^/0:/' "$dbname.conf" > "$dbname.db"
 }
 
+
+# Function to create the raw .conf files containing information gathered from
+# the system, e.g. queues, app profiles, users, slots etc.
 function scan_config {
 
 	local cfgfile="$configdir/$1.conf"
@@ -146,17 +180,22 @@ function scan_config {
 	case $1 in
 
 		"profiles")
+			# Grab application profiles from LSF that stat with 'gl_'
 			runuser -l $admin -c bapp | grep gl_ | awk '{print $1}' > "$cfgfile"
 			;;
 
 		"users")
+			# Grab LSF users by looking at home directories
 			ls /home > "$cfgfile"
 			;;
 
 		"slots")
+			# Generate a list of slot counts, power of 2, less than maximum avail slots
 			local maxslots=$(runuser -l $admin -c bhosts | tail -n +2 | awk '{print $4}' | paste -sd+ | bc)
 			local slotcount=1
 			
+			# Create a list of slots, starting with 1 and doubling until max slots has
+			# been reached, e.g max slots = 16, slot list = 1, 2, 4, 8, 16
 			rm -f "$cfgfile"
 			while [ $slotcount -lt $maxslots ]
 			do
@@ -167,6 +206,7 @@ function scan_config {
 			;;
 
 		"runtimes")
+			# Hard coded list of available runtimes
 			cat > "$cfgfile" <<-EOF
 			1
 			5
@@ -180,6 +220,7 @@ function scan_config {
 			;;
 
 		"queues")
+			# Grab list of available queues from LSF
 			runuser -l $admin -c bqueues | tail -n+2 | awk '{print $1}' > $cfgfile
 			;;
 	esac
@@ -188,6 +229,7 @@ function scan_config {
 	create_db "$1"
 }
 
+# Function to print out command usage information.
 function print_usage {
 
 	cat <<-EOF
@@ -232,6 +274,24 @@ function print_usage {
 	EOF
 }
 
+
+# Function to print error messages to the log and to the terminal.
+function error {
+
+	echo "error: $1"
+	log "error: $1"
+}
+
+
+# Function to print warning messages to the log and to the terminal.
+function error {
+
+	echo "warning: $1"
+	log "warning: $1"
+}
+
+
+# Function filters logs messages when log level set to info, debug or stdout.
 function info {
 	
 	if [ "$LOGLEVEL" != 'none' ]
@@ -240,6 +300,8 @@ function info {
 	fi
 }
 
+
+# Function filters logs messages when log level set to debug or stdout.
 function debug {
 
 	if [ "$LOGLEVEL" = 'debug' ] || [ "$LOGLEVEL" = 'stdout' ]
@@ -248,6 +310,9 @@ function debug {
 	fi
 }
 
+
+# Function prints logs to screen when loglevel is stdout, and to the
+# logfile when loglevel is info or debug.
 function log {
 
 	if [ -z "$instance" ]
@@ -271,20 +336,35 @@ function log {
 # MAIN
 #
 
-clustername=$(lsid | grep "My cluster" | awk '{print $NF}')
+# Couple sanity checks to confirm LIM and MBATCHD are even running
+ps -ef | grep [l]im 2>&1 > /dev/null
 if [ $? -ne 0 ]
 then
-	LOGLEVEL='stdout'
-	info "Error: Cannot query LSF cluster"
+    echo 'warning: LIM not running, exiting'
 	exit 1
 fi
 
+ps -ef | grep [m]batchd 2>&1 > /dev/null
+if [ $? -ne 0 ]
+then
+	echo 'warning: MBATCHD not running, exiting'
+	exit 1
+fi
+
+# Finally run a command against the cluster, timeout and fail after 10 seconds
+clustername=$(timeout 10 lsid | grep "My cluster" | awk '{print $NF}')
+if [ $? -ne 0 ]
+then
+	echo 'error: cannot query LSF cluster'
+	exit 1
+fi
+
+# Get the LSF administrator to run all future LSF commands
 admin=$(grep -i ^administrators $LSF_ENVDIR/lsf.cluster.* | awk '{print $3}')
 runuser -l $admin -c bhosts > /dev/null
 if [ $? -ne 0 ]
 then
-	LOGLEVEL='stdout'
-	info "Error: Unable to run commands as primary LSF administrator: $admin"
+	echo "error: unable to run commands as primary LSF administrator: $admin"
 	exit 1
 fi
 
@@ -317,7 +397,8 @@ do
 	[ ! -f "$configdir/$item.conf" ] || [ ! -f "$configdir/$item.db" ] && scan_config $item
 done
 
-# Set instance number
+# Set instance number. If running multiple copies of genload each one has an instance
+# number to help differentiate their workload in the cluster
 if [ -f "$insfile" ]
 then
 	instance="$(cat $insfile)"
@@ -335,7 +416,7 @@ then
 	info "first run, setting capacity to 0 slots"
 fi
 
-
+# Parse command line options, options cannot be combined
 case $cmd in
 
 	"-h" | "--help" | "help")
@@ -412,6 +493,7 @@ case $cmd in
 		;;
 
 	"")
+		# Print status report if run with no options
 		echo -e "\e[1m$config\e[0m"
 		if [ -f "$pidfile" ]
 		then
@@ -432,12 +514,16 @@ case $cmd in
 
 esac	
 
+# If we've got this far then we know we will be running as a daemon
+
 # Capture PID of current process for monitor/control purposes
 echo $$ > $pidfile
 log "\e[1m$config\e[0m: daemon started, PID $$, instance $instance"
 
+# Start an infinite loop for the daemon
 while true
 do
+	# Sanity check, has LSF gone down recently
 	debug "checking for LIM"
 	ps -ef | grep [l]im 2>&1 > /dev/null
 	if [ $? -ne 0 ]
@@ -447,6 +533,7 @@ do
 		continue
 	fi
 
+	# Sanity check, has LSF gone down recently
 	debug "checking for MBATCHD"
 	ps -ef | grep [m]batchd 2>&1 > /dev/null
 	if [ $? -ne 0 ]
@@ -456,7 +543,10 @@ do
 		continue
 	fi
 
+	# Number of attempts to randomly get a job that fits in the
+	# available slots
 	slotretry=5
+
 	cap=$(cat $capfile)
 	debug "requested $cap slots of workload"
 
@@ -485,13 +575,12 @@ do
 	debug "$availslots available slot(s) for new workload"
 	[ $availslots -le 0 ] && slotretry=0
 
+	# Keep retrying workload
 	while [ $slotretry -gt 0 ]
 	do
-		debug "$slotretry retries left"
 		# Get a random slot count for the job
-		slots=$(get_item "slots")
-		debug "random slot count is $slots"
-		debug "trying a $slots slot job"
+		slots=$(get_item 'slots')
+		debug "$slotretry retries left, random slot count is $slots, trying a $slots slot job"
 
 		# Make sure the job is small enough to fit in the available slots
 		if [ $slots -gt $availslots ]
@@ -502,16 +591,15 @@ do
 		fi
 
 		# Get random profile / queue / user and runtime, then submit to LSF
-		profile=$(get_item "profiles")
-		queue=$(get_item "queues")
-		user=$(get_item "users")
-		runtime=$(get_item "runtimes")
+		profile=$(get_item 'profiles')
+		queue=$(get_item 'queues')
+		user=$(get_item 'users')
+		runtime=$(get_item 'runtimes')
 		jobname="gl_${instance}_${profile:3}_${runtime}"
 
 		debug "job name: $jobname, user: $user, queue: $queue, slots: $slots, runtime: $runtime"
 
 		# Submit the job to LSF
-		#bsubcmd="bsub -app $profile -n $slots -q $queue -We $runtime blaunch runload $runtime"
 		debug "submitting job to LSF"
 		bsubcmd="bsub -J $jobname -app $profile -n $slots -q $queue -We $runtime blaunch runload $runtime"
 		debug "$bsubcmd"
